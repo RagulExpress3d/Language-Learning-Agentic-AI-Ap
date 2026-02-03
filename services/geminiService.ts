@@ -1,11 +1,11 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Lesson, Slide, QuizQuestion } from "../types";
 
 export const isKeyError = (error: any) => {
   const msg = error?.message || (typeof error === 'string' ? error : "");
   const status = error?.status || "";
-  const code = error?.code || 0;
+  const code = error?.code || error?.status || 0;
   
   return msg.includes("Requested entity was not found") || 
          msg.includes("leaked") || 
@@ -21,18 +21,16 @@ export const generateLesson = async (language: string, theme: string, goal: stri
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Generate a structured language lesson for learning ${language}. 
+      contents: `Generate a focused language lesson for learning ${language}. 
         Theme: ${theme}. User Goal: ${goal}. Proficiency Level: ${level}.
         The output MUST be in JSON format.
-        Include 4 specific vocabulary words related to the theme '${theme}' and 3 quiz questions.
-        Also include a 'scenarioPrompt' for a 5-second video illustrating these words in the ${theme} context.`,
+        Include 4 specific vocabulary words related to the theme '${theme}' and 3 quiz questions.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
             title: { type: Type.STRING },
-            scenarioPrompt: { type: Type.STRING },
             slides: {
               type: Type.ARRAY,
               items: {
@@ -42,7 +40,7 @@ export const generateLesson = async (language: string, theme: string, goal: stri
                   translation: { type: Type.STRING },
                   phonetic: { type: Type.STRING },
                   exampleSentence: { type: Type.STRING },
-                  visualPrompt: { type: Type.STRING, description: "Prompt for image generator." }
+                  visualPrompt: { type: Type.STRING, description: "Detailed prompt for an image generator illustrating this word." }
                 },
                 required: ["word", "translation", "phonetic", "exampleSentence", "visualPrompt"]
               }
@@ -61,7 +59,7 @@ export const generateLesson = async (language: string, theme: string, goal: stri
               }
             }
           },
-          required: ["title", "slides", "quizzes", "scenarioPrompt"]
+          required: ["title", "slides", "quizzes"]
         }
       }
     });
@@ -71,14 +69,36 @@ export const generateLesson = async (language: string, theme: string, goal: stri
     return {
       id: Math.random().toString(36).substr(2, 9),
       title: lessonData.title || `${theme} Lesson`,
-      scenarioPrompt: lessonData.scenarioPrompt || `Learning ${theme} basics`,
       slides: (lessonData.slides || []).map((s: any, i: number) => ({ ...s, id: `slide-${i}` })),
       quizzes: (lessonData.quizzes || []).map((q: any, i: number) => ({ ...q, id: `quiz-${i}` }))
     };
   } catch (error: any) {
-    if (isKeyError(error)) {
-      throw new Error("KEY_RESET_REQUIRED");
-    }
+    if (isKeyError(error)) throw new Error("KEY_RESET_REQUIRED");
+    throw error;
+  }
+};
+
+export const generateTTS = async (text: string, language: string): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text: `Say clearly in ${language}: ${text}` }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: 'Puck' },
+          },
+        },
+      },
+    });
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) throw new Error("No audio data returned from TTS");
+    return base64Audio;
+  } catch (error: any) {
+    if (isKeyError(error)) throw new Error("KEY_RESET_REQUIRED");
     throw error;
   }
 };
@@ -98,36 +118,6 @@ export const generateSlideImage = async (prompt: string): Promise<string> => {
       if (part.inlineData) return `data:image/png;base64,${part.inlineData.data}`;
     }
     return `https://picsum.photos/seed/${encodeURIComponent(prompt)}/400/400`;
-  } catch (error: any) {
-    if (isKeyError(error)) throw new Error("KEY_RESET_REQUIRED");
-    throw error;
-  }
-};
-
-export const generateLessonVideo = async (prompt: string): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  try {
-    let operation = await ai.models.generateVideos({
-      model: 'veo-3.1-fast-generate-preview',
-      prompt: `Animated educational clip: ${prompt}. Bright, colorful, simple characters.`,
-      config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '16:9' }
-    });
-    
-    while (!operation.done) {
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      operation = await ai.operations.getVideosOperation({ operation: operation });
-    }
-
-    const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-    const videoResponse = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
-    
-    if (!videoResponse.ok) {
-      if (videoResponse.status === 403 || videoResponse.status === 401) throw new Error("KEY_RESET_REQUIRED");
-      throw new Error(`Failed to download video: ${videoResponse.statusText}`);
-    }
-
-    const blob = await videoResponse.blob();
-    return URL.createObjectURL(blob);
   } catch (error: any) {
     if (isKeyError(error)) throw new Error("KEY_RESET_REQUIRED");
     throw error;

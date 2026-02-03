@@ -24,8 +24,6 @@ export interface Lesson {
   title: string;
   slides: Slide[];
   quizzes: QuizQuestion[];
-  scenarioPrompt?: string;
-  videoUrl?: string;
 }
 
 export interface UserState {
