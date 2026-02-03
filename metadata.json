@@ -1,0 +1,8 @@
+{
+  "name": "LingoAgent AI",
+  "description": "An agentic language learning platform that generates custom micro-lessons and visuals on demand using Gemini.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
