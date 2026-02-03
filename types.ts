@@ -34,6 +34,7 @@ export interface UserState {
   streak: number;
   language: string;
   goal: string;
+  theme: string;
   level: 'beginner' | 'intermediate' | 'advanced';
 }
 
@@ -43,6 +44,5 @@ export enum ViewState {
   LOADING,
   LESSON,
   QUIZ,
-  SUMMARY,
-  LIVE_TUTOR
+  SUMMARY
 }

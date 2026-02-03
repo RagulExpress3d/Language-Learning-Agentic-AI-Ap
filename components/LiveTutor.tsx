@@ -1,72 +1,66 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { Button } from './UI';
+import { isKeyError } from '../services/geminiService';
 
 interface LiveTutorProps {
   language: string;
   context: string;
-  onClose: () => void;
+  active: boolean;
+  onKeyError?: () => void;
 }
 
-export const LiveTutor: React.FC<LiveTutorProps> = ({ language, context, onClose }) => {
-  const [status, setStatus] = useState<'connecting' | 'listening' | 'speaking' | 'idle'>('connecting');
+export const LiveTutor: React.FC<LiveTutorProps> = ({ language, context, active, onKeyError }) => {
+  const [status, setStatus] = useState<'connecting' | 'listening' | 'speaking' | 'idle'>('idle');
   const [transcript, setTranscript] = useState<string>('');
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
-  // PCM Decoding Utilities
-  function decode(base64: string) {
+  const decode = (base64: string) => {
     const binaryString = atob(base64);
     const len = binaryString.length;
     const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
+    for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
     return bytes;
-  }
+  };
 
-  async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> {
+  const decodeAudioData = async (data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> => {
     const dataInt16 = new Int16Array(data.buffer);
     const frameCount = dataInt16.length / numChannels;
     const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
     for (let channel = 0; channel < numChannels; channel++) {
       const channelData = buffer.getChannelData(channel);
-      for (let i = 0; i < frameCount; i++) {
-        channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-      }
+      for (let i = 0; i < frameCount; i++) channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
     return buffer;
-  }
+  };
 
-  function encode(bytes: Uint8Array) {
+  const encode = (bytes: Uint8Array) => {
     let binary = '';
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
-  }
+  };
 
-  function createBlob(data: Float32Array): { data: string, mimeType: string } {
-    const l = data.length;
-    const int16 = new Int16Array(l);
-    for (let i = 0; i < l; i++) {
-      int16[i] = data[i] * 32768;
-    }
-    return {
-      data: encode(new Uint8Array(int16.buffer)),
-      mimeType: 'audio/pcm;rate=16000',
-    };
-  }
+  const createBlob = (data: Float32Array) => {
+    const int16 = new Int16Array(data.length);
+    for (let i = 0; i < data.length; i++) int16[i] = data[i] * 32768;
+    return { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
+  };
 
   useEffect(() => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    if (!active) {
+      if (sessionRef.current) sessionRef.current.then((s: any) => s.close());
+      setStatus('idle');
+      return;
+    }
+
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const inputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     const outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     audioContextRef.current = outputAudioCtx;
+    setStatus('connecting');
 
     let micStream: MediaStream;
 
@@ -75,20 +69,24 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({ language, context, onClose
       callbacks: {
         onopen: async () => {
           setStatus('listening');
-          micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          const source = inputAudioCtx.createMediaStreamSource(micStream);
-          const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
-          scriptProcessor.onaudioprocess = (e) => {
-            const inputData = e.inputBuffer.getChannelData(0);
-            const pcmBlob = createBlob(inputData);
-            sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
-          };
-          source.connect(scriptProcessor);
-          scriptProcessor.connect(inputAudioCtx.destination);
+          try {
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const source = inputAudioCtx.createMediaStreamSource(micStream);
+            const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
+            scriptProcessor.onaudioprocess = (e) => {
+              const inputData = e.inputBuffer.getChannelData(0);
+              sessionPromise.then(s => s.sendRealtimeInput({ media: createBlob(inputData) }));
+            };
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(inputAudioCtx.destination);
+          } catch (e) {
+            console.error(e);
+            setStatus('idle');
+          }
         },
         onmessage: async (message: LiveServerMessage) => {
           if (message.serverContent?.outputTranscription) {
-            setTranscript(prev => prev + ' ' + message.serverContent!.outputTranscription!.text);
+            setTranscript(message.serverContent.outputTranscription.text);
           }
 
           const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
@@ -107,25 +105,15 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({ language, context, onClose
             nextStartTimeRef.current += audioBuffer.duration;
             sourcesRef.current.add(source);
           }
-
-          if (message.serverContent?.interrupted) {
-            for (const s of sourcesRef.current) s.stop();
-            sourcesRef.current.clear();
-            nextStartTimeRef.current = 0;
-            setStatus('listening');
-          }
         },
-        onerror: (e) => console.error('Live API Error:', e),
-        onclose: () => setStatus('idle'),
+        onerror: (e: any) => {
+          if (isKeyError(e) && onKeyError) onKeyError();
+        },
       },
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-        systemInstruction: `You are a professional ${language} language tutor. 
-          Current context: ${context}. 
-          Provide real-time pronunciation guidance. 
-          Be encouraging, correct errors gently, and help the user reach their goal.
-          Listen to the user's pronunciation and tell them how to improve.`,
+        systemInstruction: `You are a supportive ${language} tutor. Context: ${context}. Correct pronunciation gently. Keep it short.`,
         outputAudioTranscription: {},
       },
     });
@@ -138,41 +126,29 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({ language, context, onClose
       outputAudioCtx.close();
       sessionPromise.then(s => s.close());
     };
-  }, [language, context]);
+  }, [active, language, context, onKeyError]);
+
+  if (!active) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-blue-600 flex flex-col items-center justify-center p-8 text-white">
-      <div className="w-full max-w-sm flex flex-col items-center space-y-12">
-        <div className="text-center space-y-4">
-          <h2 className="text-3xl font-black">Live {language} Tutor</h2>
-          <p className="text-blue-100 font-medium">Pronunciation Practice</p>
+    <div className="absolute bottom-24 left-4 right-4 z-40 bg-white/95 backdrop-blur shadow-2xl rounded-3xl p-4 border-2 border-blue-100 flex items-center space-x-4 animate-in slide-in-from-bottom-4 duration-300">
+      <div className="relative">
+        <div className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${status === 'speaking' ? 'bg-blue-500 scale-110 shadow-lg shadow-blue-200' : 'bg-gray-100'}`}>
+          <span className="text-2xl">
+            {status === 'connecting' && '⏳'}
+            {status === 'listening' && '👂'}
+            {status === 'speaking' && '🗣️'}
+          </span>
         </div>
-
-        <div className="relative flex items-center justify-center">
-          <div className={`w-48 h-48 rounded-full bg-blue-500 flex items-center justify-center border-8 border-blue-400 shadow-2xl transition-all duration-300 ${status === 'speaking' ? 'scale-110' : 'scale-100'}`}>
-            <div className="text-7xl animate-pulse">
-              {status === 'connecting' && '⏳'}
-              {status === 'listening' && '👂'}
-              {status === 'speaking' && '🗣️'}
-              {status === 'idle' && '😴'}
-            </div>
-          </div>
-          {status === 'speaking' && (
-            <div className="absolute inset-0 rounded-full border-4 border-white animate-ping opacity-20"></div>
-          )}
-        </div>
-
-        <div className="w-full bg-blue-700/50 p-6 rounded-3xl min-h-[120px] backdrop-blur-sm border border-blue-400/30">
-          <p className="text-blue-200 text-xs font-bold uppercase mb-2">Tutor Feedback</p>
-          <p className="text-lg italic font-medium">
-            {status === 'connecting' ? 'Establishing connection...' : 
-             transcript || `Say something in ${language} to begin...`}
-          </p>
-        </div>
-
-        <Button variant="secondary" onClick={onClose} className="border-none shadow-none text-blue-600">
-          Finish Session
-        </Button>
+        {status === 'speaking' && (
+          <div className="absolute -inset-1 rounded-full border-2 border-blue-400 animate-ping opacity-50"></div>
+        )}
+      </div>
+      <div className="flex-1 overflow-hidden">
+        <p className="text-xs font-bold text-blue-500 uppercase tracking-widest">Live Tutor</p>
+        <p className="text-sm font-medium text-gray-700 truncate italic">
+          {transcript || (status === 'listening' ? 'Listening...' : 'Connecting...')}
+        </p>
       </div>
     </div>
   );
