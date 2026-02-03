@@ -21,10 +21,14 @@ export const generateLesson = async (language: string, theme: string, goal: stri
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Generate a focused language lesson for learning ${language}. 
+      contents: `Generate a language lesson for an English speaker learning ${language}. 
         Theme: ${theme}. User Goal: ${goal}. Proficiency Level: ${level}.
-        The output MUST be in JSON format.
-        Include 4 specific vocabulary words related to the theme '${theme}' and 3 quiz questions.`,
+        
+        STRICT RULES:
+        1. 'title' and ALL quiz 'question' fields MUST be in English.
+        2. Slide 'word' and 'exampleSentence' MUST be in ${language}.
+        3. Quiz 'options' and 'correctAnswer' must be English meanings or translations.
+        4. Output strictly valid JSON.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -40,7 +44,7 @@ export const generateLesson = async (language: string, theme: string, goal: stri
                   translation: { type: Type.STRING },
                   phonetic: { type: Type.STRING },
                   exampleSentence: { type: Type.STRING },
-                  visualPrompt: { type: Type.STRING, description: "Detailed prompt for an image generator illustrating this word." }
+                  visualPrompt: { type: Type.STRING, description: "Prompt for image generator." }
                 },
                 required: ["word", "translation", "phonetic", "exampleSentence", "visualPrompt"]
               }
@@ -94,8 +98,18 @@ export const generateTTS = async (text: string, language: string): Promise<strin
       },
     });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!base64Audio) throw new Error("No audio data returned from TTS");
+    // Safer extraction of audio data
+    const candidate = response.candidates?.[0];
+    if (!candidate) throw new Error("No candidates in TTS response");
+
+    const parts = candidate.content?.parts || [];
+    const partWithAudio = parts.find(p => p.inlineData && p.inlineData.data);
+    const base64Audio = partWithAudio?.inlineData?.data;
+    
+    if (!base64Audio) {
+      console.warn("TTS extraction error: No audio part found among parts", parts);
+      throw new Error("No audio data returned from TTS");
+    }
     return base64Audio;
   } catch (error: any) {
     if (isKeyError(error)) throw new Error("KEY_RESET_REQUIRED");

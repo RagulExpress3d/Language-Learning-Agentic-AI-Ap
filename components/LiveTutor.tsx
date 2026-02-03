@@ -65,7 +65,8 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
       if (sessionRef.current) {
         sessionRef.current.then((s: any) => {
           try { s.close(); } catch (e) {}
-        });
+        }).catch(() => {});
+        sessionRef.current = null;
       }
       updateStatus('idle');
       return;
@@ -97,7 +98,7 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
             source.connect(scriptProcessor);
             scriptProcessor.connect(inputAudioCtx.destination);
           } catch (e) {
-            console.error('Microphone failed:', e);
+            console.error('Microphone access failed:', e);
             updateStatus('idle');
           }
         },
@@ -127,9 +128,17 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
           }
         },
         onerror: (e: any) => {
-          // Improve error reporting: e might be an ErrorEvent
-          const errorMsg = e?.message || e?.error?.message || (e instanceof Event ? "Connection Error" : String(e));
-          console.error('Live API Error:', errorMsg);
+          // Robust error parsing to prevent [object Event] logs
+          let errorMsg = "Connection Error";
+          if (e instanceof Error) errorMsg = e.message;
+          else if (e?.message) errorMsg = e.message;
+          else if (e?.reason) errorMsg = e.reason;
+          else if (e?.error?.message) errorMsg = e.error.message;
+          else if (e instanceof Event) {
+            errorMsg = "WebSocket connection closed unexpectedly or failed to establish.";
+          }
+
+          console.error('Lingo Live Tutor Error:', errorMsg, e);
           if (isKeyError(e) || errorMsg.includes("403") || errorMsg.includes("401")) {
              onKeyError?.();
           }
@@ -139,11 +148,14 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-        systemInstruction: `You are Lingo, a friendly language tutor. 
-          Current language: ${language}. 
-          Current context: ${context}. 
-          Help the user with their ${language} pronunciation. Correct them gently if they make mistakes.
-          Keep responses extremely brief and encouraging.`,
+        systemInstruction: `You are Lingo, a friendly native language tutor. 
+          Current language being learned: ${language}. 
+          The user is currently studying the word: "${context}". 
+          The user will speak to you. You MUST listen carefully to their pronunciation of "${context}".
+          1. If they say it correctly, congratulate them in English.
+          2. If they struggle, correct them gently and provide one short tip.
+          KEEP ALL YOUR RESPONSES EXTREMELY BRIEF (under 10 words).
+          NEVER respond with text, only voice.`,
       },
     });
 

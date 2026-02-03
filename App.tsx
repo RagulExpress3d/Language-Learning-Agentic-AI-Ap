@@ -15,6 +15,8 @@ const THEMES = [
   { id: 'business', label: 'Work 💼', icon: '📈' },
 ];
 
+const LANGUAGES = ['Spanish', 'French', 'Japanese', 'German', 'Italian', 'Chinese', 'Hindi', 'Tamil'];
+
 const App: React.FC = () => {
   const [user, setUser] = useState<UserState>({
     xp: 0,
@@ -36,6 +38,7 @@ const App: React.FC = () => {
   const [needsApiKey, setNeedsApiKey] = useState(false);
   const [tutorStatus, setTutorStatus] = useState<'connecting' | 'listening' | 'speaking' | 'idle'>('idle');
   const [isTTSPlaying, setIsTTSPlaying] = useState(false);
+  const [isPracticeMode, setIsPracticeMode] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -91,6 +94,7 @@ const App: React.FC = () => {
   };
 
   const nextSlide = () => {
+    setIsPracticeMode(false);
     if (lessonIndex < (currentLesson?.slides.length || 0) - 1) {
       setLessonIndex(lessonIndex + 1);
     } else {
@@ -141,7 +145,7 @@ const App: React.FC = () => {
       source.onended = () => setIsTTSPlaying(false);
       source.start();
     } catch (e) {
-      console.error('TTS Error:', e);
+      console.error('TTS Playback Error:', e);
       setIsTTSPlaying(false);
     }
   };
@@ -210,15 +214,30 @@ const App: React.FC = () => {
 
   const renderOnboarding = () => (
     <div className="p-8 flex flex-col h-full animate-in slide-in-from-right duration-500 bg-white">
-      <div className="flex-1 space-y-12 pt-10">
+      <div className="flex-1 space-y-10 pt-10">
         <div className="space-y-3">
           <h2 className="text-5xl font-black text-gray-900 tracking-tight leading-none">Custom<br/><span className="text-green-500">Path.</span></h2>
-          <p className="text-gray-400 font-bold text-lg">Personalized for you.</p>
+          <p className="text-gray-400 font-bold text-lg">Pick your target language.</p>
         </div>
 
         <div className="space-y-8">
           <div className="space-y-4">
-            <label className="text-[0.65rem] font-black text-gray-400 uppercase tracking-[0.2em] pl-2">Level Up</label>
+            <label className="text-[0.65rem] font-black text-gray-400 uppercase tracking-[0.2em] pl-2">I want to learn</label>
+            <div className="grid grid-cols-2 gap-3">
+              {LANGUAGES.map(lang => (
+                <button
+                  key={lang}
+                  onClick={() => setUser({...user, language: lang})}
+                  className={`py-4 rounded-[1.5rem] border-2 font-black text-sm transition-all ${user.language === lang ? 'bg-green-500 border-green-500 text-white shadow-lg scale-105' : 'bg-gray-50 border-gray-100 text-gray-500 hover:border-green-300'}`}
+                >
+                  {lang}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <label className="text-[0.65rem] font-black text-gray-400 uppercase tracking-[0.2em] pl-2">My Current Level</label>
             <div className="flex bg-gray-50 p-2 rounded-[1.5rem] border-2 border-gray-100">
               {['beginner', 'intermediate', 'advanced'].map(lvl => (
                 <button
@@ -230,17 +249,6 @@ const App: React.FC = () => {
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="space-y-4">
-            <label className="text-[0.65rem] font-black text-gray-400 uppercase tracking-[0.2em] pl-2">Target Language</label>
-            <select 
-              value={user.language} 
-              onChange={(e) => setUser({...user, language: e.target.value})}
-              className="w-full p-5 bg-gray-50 border-2 border-gray-100 rounded-[1.5rem] font-black text-gray-700 appearance-none focus:border-green-400 outline-none"
-            >
-              {['Spanish', 'French', 'Japanese', 'German', 'Italian', 'Chinese'].map(l => <option key={l}>{l}</option>)}
-            </select>
           </div>
         </div>
       </div>
@@ -274,26 +282,39 @@ const App: React.FC = () => {
               <img src={slide.imageUrl} alt={slide.word} className="w-full h-full object-cover" />
               <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent"></div>
             </div>
-            {/* Tutor Pulse Indicator */}
+            {/* Tutor Presence Indicator */}
             <div className={`absolute -right-2 -bottom-2 w-16 h-16 rounded-full bg-white shadow-xl flex items-center justify-center border-4 border-gray-50 transition-all duration-300 ${isSpeaking ? 'scale-110' : 'scale-100'}`}>
               <div className={`text-2xl ${isSpeaking ? 'animate-bounce' : ''}`}>🤖</div>
-              {isSpeaking && (
-                <div className="absolute -inset-2 rounded-full border-4 border-green-400 animate-ping opacity-20"></div>
+              {(isSpeaking || isPracticeMode) && (
+                <div className={`absolute -inset-2 rounded-full border-4 ${isPracticeMode ? 'border-blue-400' : 'border-green-400'} animate-ping opacity-20`}></div>
               )}
             </div>
           </div>
           
           <div className="space-y-1">
-            <div className="flex items-center justify-center space-x-4">
+            <div className="flex items-center justify-center space-x-3">
               <h1 className="text-5xl font-black text-gray-900 tracking-tighter">{slide.word}</h1>
-              <button 
-                onClick={() => triggerTutorSpeech(slide.word)}
-                disabled={isTTSPlaying}
-                className={`w-12 h-12 bg-blue-50 text-blue-500 rounded-2xl flex items-center justify-center text-2xl hover:bg-blue-100 hover:scale-110 active:scale-95 transition-all shadow-sm ${isTTSPlaying ? 'opacity-50 animate-pulse' : ''}`}
-                title="Hear Pronunciation"
-              >
-                🔊
-              </button>
+              
+              <div className="flex space-x-2">
+                {/* TTS Speaker Button */}
+                <button 
+                  onClick={() => triggerTutorSpeech(slide.word)}
+                  disabled={isTTSPlaying}
+                  className={`w-12 h-12 bg-blue-50 text-blue-500 rounded-2xl flex items-center justify-center text-2xl hover:bg-blue-100 hover:scale-110 active:scale-95 transition-all shadow-sm ${isTTSPlaying ? 'opacity-50 animate-pulse' : ''}`}
+                  title="Hear Pronunciation"
+                >
+                  🔊
+                </button>
+
+                {/* PRACTICE MIC BUTTON */}
+                <button 
+                  onClick={() => setIsPracticeMode(!isPracticeMode)}
+                  className={`w-12 h-12 rounded-2xl flex items-center justify-center text-2xl transition-all shadow-sm active:scale-95 ${isPracticeMode ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+                  title="Practice Speaking"
+                >
+                  🎙️
+                </button>
+              </div>
             </div>
             <p className="text-2xl text-blue-400 font-bold italic tracking-tight opacity-70">/ {slide.phonetic} /</p>
           </div>
@@ -305,18 +326,28 @@ const App: React.FC = () => {
             <div className="h-0.5 bg-blue-100 w-full mb-4"></div>
             <p className="text-lg text-gray-600 leading-snug font-medium italic">"{slide.exampleSentence}"</p>
           </div>
+
+          {/* Feedback Label for Mode */}
+          {isPracticeMode && (
+            <div className="px-6 py-3 bg-blue-100 text-blue-700 rounded-full font-black text-sm animate-in fade-in slide-in-from-bottom duration-300">
+              Lingo is listening... Repeat the word!
+            </div>
+          )}
         </div>
 
         <LiveTutor 
           language={user.language} 
           context={slide.word} 
-          active={view === ViewState.LESSON} 
+          active={isPracticeMode} 
           onKeyError={() => setNeedsApiKey(true)} 
           onStatusChange={setTutorStatus}
         />
 
         <div className="p-8 pt-2 flex space-x-4 bg-white z-10">
-          <Button className="flex-1 !bg-green-500 !shadow-[0_4px_0_0_#16a34a] hover:!shadow-[0_2px_0_0_#16a34a]" onClick={nextSlide}>
+          <Button 
+            className="flex-1 !bg-[#58cc02] !shadow-[0_4px_0_0_#46a302] hover:!shadow-[0_2px_0_0_#46a302] transition-colors" 
+            onClick={nextSlide}
+          >
             {lessonIndex === (currentLesson?.slides.length || 1) - 1 ? 'Start Quiz' : 'Got it!'}
           </Button>
         </div>
@@ -406,7 +437,7 @@ const App: React.FC = () => {
              <h2 className="text-6xl font-black text-gray-900 tracking-tighter">Day {user.streak}!</h2>
              <p className="text-gray-500 font-bold text-xl">+10 XP • Native Pronunciation</p>
            </div>
-           <Button className="!bg-green-500 !shadow-[0_4px_0_0_#16a34a]" onClick={() => {
+           <Button className="!bg-[#58cc02] !shadow-[0_4px_0_0_#46a302]" onClick={() => {
              setUser(prev => ({ ...prev, streak: prev.streak + 1 }));
              setView(ViewState.HOME);
            }}>Sweet!</Button>
