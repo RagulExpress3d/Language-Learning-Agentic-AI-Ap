@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { connectDB } from './config/database.js';
+import { connectDB, dbReady } from './config/database.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -27,6 +27,23 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Wait for MongoDB before handling API requests (avoids "buffering timed out")
+const DB_WAIT_MS = 20000;
+app.use('/api', (req, res, next) => {
+  const timeout = setTimeout(() => {
+    res.status(503).json({ error: 'Database unavailable. Try again in a moment.' });
+  }, DB_WAIT_MS);
+  dbReady
+    .then(() => {
+      clearTimeout(timeout);
+      next();
+    })
+    .catch(() => {
+      clearTimeout(timeout);
+      res.status(503).json({ error: 'Database connection failed. Check server logs.' });
+    });
 });
 
 app.use('/api/auth', authRoutes);
