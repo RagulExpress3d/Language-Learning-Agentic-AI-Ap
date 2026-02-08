@@ -31,7 +31,7 @@ app.get('/health', (_req, res) => {
 
 // Wait for MongoDB before handling API requests (avoids "buffering timed out")
 const DB_WAIT_MS = 20000;
-app.use('/api', (req, res, next) => {
+app.use('/api', (_req, res, next) => {
   const timeout = setTimeout(() => {
     res.status(503).json({ error: 'Database unavailable. Try again in a moment.' });
   }, DB_WAIT_MS);
