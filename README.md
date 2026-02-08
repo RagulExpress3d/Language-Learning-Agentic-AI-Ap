@@ -140,6 +140,8 @@ Generated lessons are saved in **MongoDB**:
 
 ## GitHub and Google Cloud Run
 
+**→ For a full step-by-step Cloud Run guide, see [DEPLOY_CLOUDRUN.md](DEPLOY_CLOUDRUN.md).**
+
 ### 1. Push to GitHub
 
 ```bash

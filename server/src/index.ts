@@ -46,18 +46,12 @@ if (isProduction) {
 
 app.use(errorHandler);
 
-// Start server
-const startServer = async () => {
-  try {
-    await connectDB();
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-    });
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
-  }
-};
-
-startServer();
+// Listen on PORT first so Cloud Run sees the container as ready (startup check).
+// Then connect DB in background; otherwise DB connect can hang/fail and we never bind to PORT.
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+  connectDB().catch((err) => {
+    console.error('❌ MongoDB connection failed (will retry on first request):', err.message);
+  });
+});
