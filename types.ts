@@ -42,5 +42,6 @@ export enum ViewState {
   LOADING,
   LESSON,
   QUIZ,
+  VOICE_QUIZ,
   SUMMARY
 }

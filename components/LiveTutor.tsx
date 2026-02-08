@@ -1,28 +1,58 @@
-
+/**
+ * Live Tutor – real-time voice practice via Gemini Live API.
+ * See CONVERSATIONAL_AI_STANDARDS.md for alignment with Google’s Live API docs.
+ */
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import React, { useEffect, useRef, useState } from 'react';
 import { isKeyError } from '../services/geminiService';
+import { apiService } from '../services/api';
+
+const getApiKey = () =>
+  import.meta.env.VITE_GEMINI_API_KEY || (typeof process !== 'undefined' && process.env?.API_KEY) || '';
+
+export type TranscriptEntry = { role: 'tutor' | 'user'; text: string };
+
+/** 'guide' = speak first, break down word, help user. 'score' = listen only, then give score + feedback (no guiding). */
+export type PronunciationMode = 'guide' | 'score';
 
 interface LiveTutorProps {
   language: string;
   context: string;
   active: boolean;
+  /** In quiz pronunciation: use 'score' so AI only listens and gives score/feedback. Default 'guide'. */
+  pronunciationMode?: PronunciationMode;
   onKeyError?: () => void;
   onStatusChange?: (status: 'connecting' | 'listening' | 'speaking' | 'idle') => void;
+  onTranscriptEntry?: (entry: TranscriptEntry) => void;
+  lessonId?: string;
 }
 
 export const LiveTutor: React.FC<LiveTutorProps> = ({ 
   language, 
   context, 
   active, 
+  pronunciationMode = 'guide',
   onKeyError,
-  onStatusChange 
+  onStatusChange,
+  onTranscriptEntry,
+  lessonId
 }) => {
   const [status, setStatus] = useState<'connecting' | 'listening' | 'speaking' | 'idle'>('idle');
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const speechRecognitionRef = useRef<SpeechRecognition | null>(null);
+  /** Start mic only after model has spoken first (so AI speaks before user) */
+  const micStartedRef = useRef(false);
+  /** Set to true in cleanup so onopen/onmessage skip work after teardown (avoids closed AudioContext use) */
+  const cancelledRef = useRef(false);
+  const onKeyErrorRef = useRef(onKeyError);
+  const onStatusChangeRef = useRef(onStatusChange);
+  const onTranscriptEntryRef = useRef(onTranscriptEntry);
+  onKeyErrorRef.current = onKeyError;
+  onStatusChangeRef.current = onStatusChange;
+  onTranscriptEntryRef.current = onTranscriptEntry;
 
   const decode = (base64: string) => {
     const binaryString = atob(base64);
@@ -51,17 +81,21 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
 
   const createBlob = (data: Float32Array) => {
     const int16 = new Int16Array(data.length);
-    for (let i = 0; i < data.length; i++) int16[i] = data[i] * 32768;
+    for (let i = 0; i < data.length; i++) {
+      const s = Math.max(-1, Math.min(1, data[i])) * 32768;
+      int16[i] = Math.max(-32768, Math.min(32767, Math.round(s)));
+    }
     return { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
   };
 
   const updateStatus = (newStatus: 'connecting' | 'listening' | 'speaking' | 'idle') => {
     setStatus(newStatus);
-    onStatusChange?.(newStatus);
+    onStatusChangeRef.current?.(newStatus);
   };
 
   useEffect(() => {
     if (!active) {
+      cancelledRef.current = true;
       if (sessionRef.current) {
         sessionRef.current.then((s: any) => {
           try { s.close(); } catch (e) {}
@@ -72,52 +106,200 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
       return;
     }
 
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const inputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-    const outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    cancelledRef.current = false;
+
+    // Prevent overlapping connections (e.g. React Strict Mode double-mount)
+    if (sessionRef.current) {
+      console.log('LiveTutor: skipping connect (session already in progress)');
+      return;
+    }
+
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      console.error('LiveTutor: No API key. Set VITE_GEMINI_API_KEY in .env');
+      onKeyErrorRef.current?.();
+      updateStatus('idle');
+      return;
+    }
+
+    let micStream: MediaStream | undefined;
+    let inputAudioCtx: AudioContext;
+    let outputAudioCtx: AudioContext;
+
+    try {
+      inputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    } catch (e) {
+      console.error('LiveTutor: AudioContext failed', e);
+      updateStatus('idle');
+      return;
+    }
+
+    // Base URL without trailing slash to avoid ...com//ws/... (SDK bug) and "Insufficient resources"
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { baseUrl: 'https://generativelanguage.googleapis.com' },
+    });
+    if (!ai.live?.connect) {
+      console.error('LiveTutor: Live API not available on this client');
+      onKeyErrorRef.current?.();
+      updateStatus('idle');
+      return;
+    }
     audioContextRef.current = outputAudioCtx;
+    // Resume so playback is allowed (browser autoplay policy requires user gesture)
+    outputAudioCtx.resume().catch(() => {});
+
+    const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
+    console.log('LiveTutor: starting connection (model:', LIVE_MODEL, ')');
     updateStatus('connecting');
 
-    let micStream: MediaStream;
-
-    const sessionPromise = ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+    let sessionPromise: Promise<any>;
+    try {
+      sessionPromise = ai.live.connect({
+      model: LIVE_MODEL,
       callbacks: {
         onopen: async () => {
-          updateStatus('listening');
+          console.log('LiveTutor: WebSocket open, waiting for setupComplete…');
+          if (cancelledRef.current) return;
+          updateStatus('connecting');
           try {
             micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const source = inputAudioCtx.createMediaStreamSource(micStream);
-            const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              sessionPromise.then(s => {
-                try { s.sendRealtimeInput({ media: createBlob(inputData) }); } catch (err) {}
-              });
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputAudioCtx.destination);
+            if (cancelledRef.current) { micStream.getTracks().forEach(t => t.stop()); return; }
+            if (pronunciationMode === 'score') {
+              if (inputAudioCtx.state === 'closed') { micStream.getTracks().forEach(t => t.stop()); return; }
+              const source = inputAudioCtx.createMediaStreamSource(micStream);
+              const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
+              scriptProcessor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                sessionPromise.then(s => { try { s.sendRealtimeInput({ audio: createBlob(inputData) }); } catch (err) {} });
+              };
+              source.connect(scriptProcessor);
+              scriptProcessor.connect(inputAudioCtx.destination);
+              micStartedRef.current = true;
+              updateStatus('listening');
+              apiService.trackEvent('voice_practice', { language, context, lessonId }).catch(() => {});
+            }
           } catch (e) {
-            console.error('Microphone access failed:', e);
+            console.error('LiveTutor: Microphone access failed', e);
             updateStatus('idle');
           }
         },
         onmessage: async (message: LiveServerMessage) => {
-          const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-          if (base64Audio) {
+          if (cancelledRef.current) return;
+          // Send "speak first" prompt only after setup is complete (API requirement)
+          if (message.setupComplete !== undefined) {
+            try {
+              if (cancelledRef.current) return;
+              const session = await sessionPromise;
+              if (session.sendClientContent) {
+                if (pronunciationMode === 'score') {
+                  session.sendClientContent({
+                    turns: [{ role: 'user', parts: [{ text: `I am about to pronounce the word "${context}" in ${language}. Do not speak. Wait until you hear me say it. Then respond with ONLY: (1) "Score: X out of 10" with a number, (2) one short sentence of feedback in English. Do not guide, repeat the word, or help.` }] }],
+                    turnComplete: true,
+                  });
+                  console.log('LiveTutor: score mode — waiting for user to pronounce, then will give score + feedback.');
+                } else {
+                  session.sendClientContent({
+                    turns: [{ role: 'user', parts: [{ text: `Begin the lesson. Break the word "${context}" into simpler syllables or vowel parts in ${language}. Say "Repeat after me", then say each part slowly, then the full word, then "Your turn" and wait for me to repeat.` }] }],
+                    turnComplete: true,
+                  });
+                  console.log('LiveTutor: sendClientContent sent (tutor should speak soon).');
+                }
+              }
+            } catch (e) {
+              console.warn('LiveTutor: sendClientContent failed', e);
+            }
+          }
+
+          const parts = message.serverContent?.modelTurn?.parts ?? [];
+          const audioPartCount = parts.filter(p => p.inlineData?.data).length;
+          if (audioPartCount > 0) {
+            console.log('LiveTutor: playing', audioPartCount, 'audio chunk(s).');
+            if (!micStartedRef.current) {
+              micStartedRef.current = true;
+              (async () => {
+                if (cancelledRef.current || inputAudioCtx.state === 'closed') return;
+                try {
+                  if (!micStream) {
+                    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    if (cancelledRef.current) { micStream.getTracks().forEach(t => t.stop()); return; }
+                  }
+                  if (inputAudioCtx.state === 'closed') {
+                    if (micStream) micStream.getTracks().forEach(t => t.stop());
+                    return;
+                  }
+                  const source = inputAudioCtx.createMediaStreamSource(micStream!);
+                  const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
+                  scriptProcessor.onaudioprocess = (e) => {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    sessionPromise.then(s => {
+                      try { s.sendRealtimeInput({ audio: createBlob(inputData) }); } catch (err) {}
+                    });
+                  };
+                  source.connect(scriptProcessor);
+                  scriptProcessor.connect(inputAudioCtx.destination);
+                  updateStatus('listening');
+                  apiService.trackEvent('voice_practice', { language, context, lessonId }).catch(() => {});
+
+                  const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+                  if (SpeechRecognitionAPI && !cancelledRef.current) {
+                    try {
+                      const recognition = new SpeechRecognitionAPI();
+                      recognition.continuous = true;
+                      recognition.interimResults = true;
+                      recognition.lang = language === 'Spanish' ? 'es-ES' : language === 'French' ? 'fr-FR' : language === 'Japanese' ? 'ja-JP' : language === 'German' ? 'de-DE' : language === 'Italian' ? 'it-IT' : language === 'Chinese' ? 'zh-CN' : language === 'Hindi' ? 'hi-IN' : language === 'Tamil' ? 'ta-IN' : 'en-US';
+                      recognition.onresult = (e: SpeechRecognitionEvent) => {
+                        if (cancelledRef.current) return;
+                        const last = e.results[e.results.length - 1];
+                        if (last.isFinal && last[0]?.transcript?.trim()) {
+                          onTranscriptEntryRef.current?.({ role: 'user', text: last[0].transcript.trim() });
+                        }
+                      };
+                      recognition.onerror = () => {};
+                      recognition.start();
+                      speechRecognitionRef.current = recognition;
+                    } catch (_) {}
+                  }
+                } catch (e) {
+                  console.error('LiveTutor: Microphone access failed', e);
+                  updateStatus('idle');
+                }
+              })();
+            }
+          } else if (message.serverContent?.modelTurn && parts.length > 0) {
+            console.log('LiveTutor: serverContent has modelTurn but no inlineData audio; parts:', parts.length);
+          }
+
+          for (const part of parts) {
+            const text = (part as { text?: string }).text;
+            if (text?.trim()) {
+              onTranscriptEntryRef.current?.({ role: 'tutor', text: text.trim() });
+            }
+            const base64Audio = part.inlineData?.data;
+            if (!base64Audio) continue;
+            if (cancelledRef.current || outputAudioCtx.state === 'closed') continue;
             updateStatus('speaking');
-            nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioCtx.currentTime);
-            const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioCtx, 24000, 1);
-            const source = outputAudioCtx.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(outputAudioCtx.destination);
-            source.addEventListener('ended', () => {
-              sourcesRef.current.delete(source);
-              if (sourcesRef.current.size === 0) updateStatus('listening');
-            });
-            source.start(nextStartTimeRef.current);
-            nextStartTimeRef.current += audioBuffer.duration;
-            sourcesRef.current.add(source);
+            try {
+              if (outputAudioCtx.state === 'suspended') {
+                await outputAudioCtx.resume();
+              }
+              if (cancelledRef.current || outputAudioCtx.state === 'closed') continue;
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioCtx.currentTime);
+              const audioBuffer = await decodeAudioData(decode(base64Audio), outputAudioCtx, 24000, 1);
+              const source = outputAudioCtx.createBufferSource();
+              source.buffer = audioBuffer;
+              source.connect(outputAudioCtx.destination);
+              source.addEventListener('ended', () => {
+                sourcesRef.current.delete(source);
+                if (sourcesRef.current.size === 0) updateStatus('listening');
+              });
+              source.start(nextStartTimeRef.current);
+              nextStartTimeRef.current += audioBuffer.duration;
+              sourcesRef.current.add(source);
+            } catch (e) {
+              console.warn('LiveTutor: failed to play audio chunk', e);
+            }
           }
 
           if (message.serverContent?.interrupted) {
@@ -128,7 +310,6 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
           }
         },
         onerror: (e: any) => {
-          // Robust error parsing to prevent [object Event] logs
           let errorMsg = "Connection Error";
           if (e instanceof Error) errorMsg = e.message;
           else if (e?.message) errorMsg = e.message;
@@ -137,39 +318,80 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
           else if (e instanceof Event) {
             errorMsg = "WebSocket connection closed unexpectedly or failed to establish.";
           }
-
-          console.error('Lingo Live Tutor Error:', errorMsg, e);
+          console.error('LiveTutor: onerror →', errorMsg, e);
+          updateStatus('idle');
           if (isKeyError(e) || errorMsg.includes("403") || errorMsg.includes("401")) {
-             onKeyError?.();
+            onKeyErrorRef.current?.();
           }
         },
-        onclose: () => updateStatus('idle'),
+        onclose: (e: any) => {
+          const code = e?.code !== undefined ? e.code : 'unknown';
+          const reason = (e?.reason ?? '') as string;
+          console.log('LiveTutor: onclose → code', code, 'reason', reason || '(none)');
+          updateStatus('idle');
+        },
       },
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-        systemInstruction: `You are Lingo, a friendly native language tutor. 
-          Current language being learned: ${language}. 
-          The user is currently studying the word: "${context}". 
-          The user will speak to you. You MUST listen carefully to their pronunciation of "${context}".
-          1. If they say it correctly, congratulate them in English.
-          2. If they struggle, correct them gently and provide one short tip.
-          KEEP ALL YOUR RESPONSES EXTREMELY BRIEF (under 10 words).
-          NEVER respond with text, only voice.`,
+        systemInstruction: pronunciationMode === 'score'
+          ? `You are a pronunciation scorer. The word the user will say is "${context}" in ${language}.
+
+RULES:
+- Do NOT speak first. Do NOT say the word, guide, or help. Wait in silence for the user to pronounce it.
+- When you hear their pronunciation, respond with ONLY two things in a short voice message: (1) "Score: X out of 10" with a number from 1 to 10, (2) one short sentence of feedback in English (what was good or what to improve). Example: "Score: 7 out of 10. Good attempt; try to stress the second syllable more."
+- Keep your entire response under 25 words. No repeating the word, no "try again", no teaching. Only score and feedback.`
+          : `You are Lingo, a friendly native language tutor. The learner is practicing the word "${context}" in ${language}.
+
+CRITICAL - When the user says "Begin the lesson", help them learn by breaking the word into simpler parts. Speak out loud in this order:
+1. Say "Repeat after me."
+2. Break "${context}" into easier pieces: say each syllable or vowel chunk slowly and clearly (e.g. "First: [part one]. Then: [part two]." or "Listen: [syllable] ... [syllable] ... [syllable]."). Use the natural syllable breaks and vowel sounds of ${language}.
+3. Then say the full word "${context}" once at normal speed.
+4. Say "Now you try" or "Your turn" and stay silent and wait for the learner to repeat.
+
+If the learner struggles or gets it wrong: break the word down again into the same simple parts, say each part slowly, then the full word. Give one short tip (e.g. which vowel to hold, or where to put the stress). Keep it under 15 words total.
+
+After they repeat (correct or after a retry): give brief voice-only feedback (under 10 words). If correct, praise in English. If wrong, repeat the broken-down pronunciation once more, then encourage.
+
+Then ask: "Do you want to try once more?"
+- If they say yes / sure / again / one more: break down "${context}" again (syllables or parts), say each part slowly, then the full word, then "Your turn" and wait.
+- If they say no / I'm good / next / okay / done: say something brief like "Okay, you can proceed to the next when you're ready." Under 10 words.
+
+Voice only, no text. Speak clearly and a bit slowly when breaking into parts.`,
       },
     });
+    } catch (e) {
+      console.error('LiveTutor: connect failed', e);
+      onKeyErrorRef.current?.();
+      updateStatus('idle');
+      return;
+    }
 
+    sessionPromise.catch((e) => {
+      console.error('LiveTutor: connection promise rejected', e);
+      onKeyErrorRef.current?.();
+      updateStatus('idle');
+    });
     sessionRef.current = sessionPromise;
 
     return () => {
+      cancelledRef.current = true;
+      micStartedRef.current = false;
+      sessionRef.current = null;
+      try {
+        speechRecognitionRef.current?.stop();
+      } catch (e) {}
+      speechRecognitionRef.current = null;
       if (micStream) micStream.getTracks().forEach(t => t.stop());
-      inputAudioCtx.close();
-      outputAudioCtx.close();
+      try {
+        if (inputAudioCtx?.state !== 'closed') inputAudioCtx.close();
+        if (outputAudioCtx?.state !== 'closed') outputAudioCtx.close();
+      } catch (e) {}
       sessionPromise.then(s => {
         try { s.close(); } catch (e) {}
       }).catch(() => {});
     };
-  }, [active, language, context, onKeyError]);
+  }, [active, language, context, pronunciationMode]);
 
   return null;
 };

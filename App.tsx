@@ -1,11 +1,13 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { UserState, ViewState, Lesson } from './types';
-import { generateLesson, generateSlideImage, generateTTS } from './services/geminiService';
+import { generateTTS } from './services/geminiService';
+import { apiService } from './services/api';
 import { Layout } from './components/Layout';
 import { Button, HeartIcon, XPIcon } from './components/UI';
 import { ProgressBar } from './components/ProgressBar';
 import { LiveTutor } from './components/LiveTutor';
+import { Auth } from './src/components/Auth';
 
 const THEMES = [
   { id: 'auto', label: 'Surprise Me ✨', icon: '🪄' },
@@ -18,16 +20,17 @@ const THEMES = [
 const LANGUAGES = ['Spanish', 'French', 'Japanese', 'German', 'Italian', 'Chinese', 'Hindi', 'Tamil'];
 
 const App: React.FC = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null); // null = checking, false = not auth, true = auth
   const [user, setUser] = useState<UserState>({
     xp: 0,
     hearts: 5,
-    streak: 3,
+    streak: 0,
     language: 'Spanish',
     goal: 'Quick Practice',
     theme: 'auto',
     level: 'beginner'
   });
-
+  const [currentLessonId, setCurrentLessonId] = useState<string | null>(null);
   const [view, setView] = useState<ViewState>(ViewState.HOME);
   const [currentLesson, setCurrentLesson] = useState<Lesson | null>(null);
   const [lessonIndex, setLessonIndex] = useState(0);
@@ -39,10 +42,46 @@ const App: React.FC = () => {
   const [tutorStatus, setTutorStatus] = useState<'connecting' | 'listening' | 'speaking' | 'idle'>('idle');
   const [isTTSPlaying, setIsTTSPlaying] = useState(false);
   const [isPracticeMode, setIsPracticeMode] = useState(false);
-
+  const [lessonStartTime, setLessonStartTime] = useState<number>(0);
+  const [voiceQuizCardIndex, setVoiceQuizCardIndex] = useState(0);
+  const [isVoiceQuizMicOn, setIsVoiceQuizMicOn] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const token = apiService.getToken();
+        if (token) {
+          try {
+            const { user: userData } = await apiService.getCurrentUser();
+            setUser({
+              xp: userData.xp || 0,
+              hearts: userData.hearts || 5,
+              streak: userData.streak || 0,
+              language: userData.languages?.[0]?.language || 'Spanish',
+              goal: 'Quick Practice',
+              theme: userData.languages?.[0]?.preferredTheme || 'auto',
+              level: userData.languages?.[0]?.level || 'beginner'
+            });
+            setIsAuthenticated(true);
+          } catch (err) {
+            // Token invalid, clear it
+            console.error('Auth check failed:', err);
+            apiService.setToken(null);
+            setIsAuthenticated(false);
+          }
+        } else {
+          setIsAuthenticated(false);
+        }
+      } catch (error) {
+        // Not authenticated - show auth screen
+        console.error('Auth error:', error);
+        apiService.setToken(null);
+        setIsAuthenticated(false);
+      }
+    };
+    checkAuth();
+
     const checkKey = async () => {
       // @ts-ignore
       if (window.aistudio) {
@@ -67,23 +106,47 @@ const App: React.FC = () => {
     setIsLoading(true);
     setLoadingStep('Lingo Agent is preparing...');
     setView(ViewState.LOADING);
+    setLessonStartTime(Date.now());
     
     try {
       const themes = ['Urban Life', 'Space Travel', 'Ancient History', 'Coffee Shop', 'Music Festival'];
       const selectedTheme = user.theme === 'auto' ? themes[Math.floor(Math.random() * themes.length)] : user.theme;
-      const lesson = await generateLesson(user.language, selectedTheme, user.goal, user.level);
       
-      setLoadingStep('Drawing mnemonic visuals...');
-      const slidesWithImages = await Promise.all(
-        lesson.slides.map(async (slide) => {
-          const imageUrl = await generateSlideImage(slide.visualPrompt);
-          return { ...slide, imageUrl };
-        })
+      // Use backend API to generate lesson with AI personalization
+      const { lesson: lessonData } = await apiService.generateLesson(
+        user.language,
+        selectedTheme,
+        user.goal,
+        user.level
       );
       
-      setCurrentLesson({ ...lesson, slides: slidesWithImages });
+      // Convert backend lesson format to frontend format
+      const lesson: Lesson = {
+        id: lessonData._id || lessonData.id,
+        title: lessonData.title,
+        slides: lessonData.slides.map((s: any, i: number) => ({
+          ...s,
+          id: `slide-${i}`,
+          imageUrl: s.imageUrl
+        })),
+        quizzes: lessonData.quizzes.map((q: any, i: number) => ({
+          ...q,
+          id: `quiz-${i}`
+        }))
+      };
+      
+      setCurrentLessonId(lesson.id);
+      setCurrentLesson(lesson);
       setView(ViewState.LESSON);
       setLessonIndex(0);
+      
+      // Track analytics
+      await apiService.trackEvent('lesson_started', {
+        language: user.language,
+        theme: selectedTheme,
+        level: user.level,
+        lessonId: lesson.id
+      });
     } catch (error: any) {
       if (String(error).includes("KEY_RESET_REQUIRED")) setNeedsApiKey(true);
       else alert("Agent encountered an error. Let's try again.");
@@ -103,15 +166,27 @@ const App: React.FC = () => {
     }
   };
 
-  const handleQuizAnswer = (answer: string) => {
+  const handleQuizAnswer = async (answer: string) => {
     const question = currentLesson?.quizzes[quizIndex];
-    if (answer === question?.correctAnswer) {
+    const isCorrect = answer === question?.correctAnswer;
+    
+    if (isCorrect) {
       setFeedback({ type: 'success', message: 'You got it!' });
+      await apiService.updateStats(10, 0, user.language);
       setUser(prev => ({ ...prev, xp: prev.xp + 10 }));
     } else {
       setFeedback({ type: 'error', message: `Not quite. It's: ${question?.correctAnswer}` });
+      await apiService.updateStats(0, -1, user.language);
       setUser(prev => ({ ...prev, hearts: Math.max(0, prev.hearts - 1) }));
     }
+    
+    // Track analytics
+    await apiService.trackEvent('quiz_answered', {
+      lessonId: currentLessonId,
+      quizId: question?.id,
+      correct: isCorrect,
+      language: user.language
+    });
   };
 
   const decodeAudioData = async (data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> => {
@@ -227,7 +302,10 @@ const App: React.FC = () => {
               {LANGUAGES.map(lang => (
                 <button
                   key={lang}
-                  onClick={() => setUser({...user, language: lang})}
+                  onClick={async () => {
+                    setUser({...user, language: lang});
+                    await apiService.updateLanguage(lang, user.level);
+                  }}
                   className={`py-4 rounded-[1.5rem] border-2 font-black text-sm transition-all ${user.language === lang ? 'bg-green-500 border-green-500 text-white shadow-lg scale-105' : 'bg-gray-50 border-gray-100 text-gray-500 hover:border-green-300'}`}
                 >
                   {lang}
@@ -242,7 +320,10 @@ const App: React.FC = () => {
               {['beginner', 'intermediate', 'advanced'].map(lvl => (
                 <button
                   key={lvl}
-                  onClick={() => setUser({...user, level: lvl as any})}
+                  onClick={async () => {
+                    setUser({...user, level: lvl as any});
+                    await apiService.updateLanguage(user.language, lvl);
+                  }}
                   className={`flex-1 py-4 rounded-xl font-black text-sm capitalize transition-all ${user.level === lvl ? 'bg-white shadow-md text-green-500' : 'text-gray-400 hover:text-gray-600'}`}
                 >
                   {lvl}
@@ -276,7 +357,7 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex-1 flex flex-col items-center p-8 text-center space-y-8 overflow-y-auto pt-0">
+        <div className="flex-1 flex flex-col items-center p-8 text-center space-y-8 overflow-y-auto overflow-x-hidden min-w-0 w-full pt-0">
           <div className="relative group w-full">
             <div className="w-full aspect-square bg-gray-50 rounded-[3rem] overflow-hidden shadow-2xl border-[12px] border-white relative">
               <img src={slide.imageUrl} alt={slide.word} className="w-full h-full object-cover" />
@@ -291,9 +372,9 @@ const App: React.FC = () => {
             </div>
           </div>
           
-          <div className="space-y-1">
-            <div className="flex items-center justify-center space-x-3">
-              <h1 className="text-5xl font-black text-gray-900 tracking-tighter">{slide.word}</h1>
+          <div className="space-y-1 min-w-0 w-full">
+            <div className="flex items-center justify-center space-x-3 min-w-0">
+              <h1 className="text-5xl font-black text-gray-900 tracking-tighter break-words min-w-0">{slide.word}</h1>
               
               <div className="flex space-x-2">
                 {/* TTS Speaker Button */}
@@ -316,7 +397,7 @@ const App: React.FC = () => {
                 </button>
               </div>
             </div>
-            <p className="text-2xl text-blue-400 font-bold italic tracking-tight opacity-70">/ {slide.phonetic} /</p>
+            <p className="text-2xl text-blue-400 font-bold italic tracking-tight opacity-70 break-all min-w-0">/ {slide.phonetic} /</p>
           </div>
 
           <div className="bg-blue-50/50 p-8 rounded-[2.5rem] w-full text-left relative overflow-hidden">
@@ -327,10 +408,13 @@ const App: React.FC = () => {
             <p className="text-lg text-gray-600 leading-snug font-medium italic">"{slide.exampleSentence}"</p>
           </div>
 
-          {/* Feedback Label for Mode */}
+          {/* Feedback Label for Mode — shows LiveTutor status; open DevTools (F12) → Console for "LiveTutor:" logs */}
           {isPracticeMode && (
-            <div className="px-6 py-3 bg-blue-100 text-blue-700 rounded-full font-black text-sm animate-in fade-in slide-in-from-bottom duration-300">
-              Lingo is listening... Repeat the word!
+            <div className="px-6 py-3 bg-blue-100 text-blue-700 rounded-full font-black text-sm animate-in fade-in slide-in-from-bottom duration-300 max-w-full overflow-hidden text-center">
+              {tutorStatus === 'connecting' && 'Lingo: connecting…'}
+              {tutorStatus === 'listening' && 'Lingo: listening… Repeat the word!'}
+              {tutorStatus === 'speaking' && 'Lingo: speaking…'}
+              {tutorStatus === 'idle' && 'Lingo: idle. Click mic again if needed.'}
             </div>
           )}
         </div>
@@ -341,6 +425,7 @@ const App: React.FC = () => {
           active={isPracticeMode} 
           onKeyError={() => setNeedsApiKey(true)} 
           onStatusChange={setTutorStatus}
+          lessonId={currentLessonId || undefined}
         />
 
         <div className="p-8 pt-2 flex space-x-4 bg-white z-10">
@@ -398,10 +483,15 @@ const App: React.FC = () => {
               </div>
               <Button 
                 className={feedback.type === 'success' ? '!bg-green-500 !shadow-[0_4px_0_0_#16a34a]' : '!bg-red-500 !shadow-[0_4px_0_0_#dc2626]'}
-                onClick={() => {
+                onClick={async () => {
                   setFeedback(null);
-                  if (quizIndex < (currentLesson?.quizzes.length || 0) - 1) setQuizIndex(quizIndex + 1);
-                  else setView(ViewState.SUMMARY);
+                  if (quizIndex < (currentLesson?.quizzes.length || 0) - 1) {
+                    setQuizIndex(quizIndex + 1);
+                  } else {
+                    setVoiceQuizCardIndex(0);
+                    setIsVoiceQuizMicOn(false);
+                    setView(ViewState.VOICE_QUIZ);
+                  }
                 }}
               >
                 Continue
@@ -411,6 +501,150 @@ const App: React.FC = () => {
       </div>
     );
   };
+
+  const finishLessonAndGoToSummary = async () => {
+    if (currentLessonId && lessonStartTime) {
+      const timeSpent = Math.floor((Date.now() - lessonStartTime) / 1000);
+      const correctAnswers = currentLesson?.quizzes.length || 0;
+      const score = Math.floor((correctAnswers / (currentLesson?.quizzes.length || 1)) * 100);
+      await apiService.completeLesson(currentLessonId, score, timeSpent);
+      const progress: any = await apiService.getProgressSummary();
+      setUser(prev => ({
+        ...prev,
+        xp: progress.totalXP || prev.xp,
+        hearts: progress.hearts || prev.hearts,
+        streak: progress.streak || prev.streak
+      }));
+    }
+    setView(ViewState.SUMMARY);
+  };
+
+  const renderVoiceQuiz = () => {
+    const slides = currentLesson?.slides ?? [];
+    const totalCards = slides.length;
+    const currentSlide = slides[voiceQuizCardIndex];
+    const isLastCard = voiceQuizCardIndex >= totalCards - 1;
+
+    if (totalCards === 0) {
+      return (
+        <div className="p-8 flex flex-col h-full items-center justify-center text-center space-y-6">
+          <p className="text-gray-500 font-bold">No words to practice. Great job!</p>
+          <Button onClick={finishLessonAndGoToSummary}>Finish</Button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex flex-col h-full bg-white relative animate-in fade-in duration-500">
+        <div className="p-6 pb-2">
+          <div className="flex items-center justify-between">
+            <button onClick={() => setView(ViewState.HOME)} className="text-gray-300 hover:text-gray-600 transition-colors">✕</button>
+            <p className="text-sm font-black text-gray-400 uppercase tracking-wider">
+              Pronunciation practice {voiceQuizCardIndex + 1} of {totalCards}
+            </p>
+            <div className="w-8" />
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col items-center p-6 text-center space-y-6 overflow-y-auto min-w-0 w-full">
+          <div className="w-full aspect-square max-w-sm mx-auto bg-gray-50 rounded-[2.5rem] overflow-hidden shadow-xl border-8 border-white">
+            <img src={currentSlide.imageUrl} alt={currentSlide.word} className="w-full h-full object-cover" />
+          </div>
+          <div className="space-y-1">
+            <h1 className="text-4xl font-black text-gray-900 tracking-tighter break-words">{currentSlide.word}</h1>
+            <p className="text-xl text-blue-400 font-bold italic">/ {currentSlide.phonetic} /</p>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <span className="text-gray-500 font-bold text-sm">Tap mic, say the word — Lingo will score and give feedback</span>
+            <button
+              onClick={() => setIsVoiceQuizMicOn(!isVoiceQuizMicOn)}
+              className={`w-14 h-14 rounded-2xl flex items-center justify-center text-2xl transition-all shadow-sm active:scale-95 ${isVoiceQuizMicOn ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+              title="Practice with Lingo"
+            >
+              🎙️
+            </button>
+          </div>
+
+          {isVoiceQuizMicOn && (
+            <div className="px-6 py-3 bg-blue-100 text-blue-700 rounded-full font-black text-sm max-w-full overflow-hidden text-center">
+              {tutorStatus === 'connecting' && 'Lingo: connecting…'}
+              {tutorStatus === 'listening' && 'Lingo: listening… Say the word to get your score.'}
+              {tutorStatus === 'speaking' && 'Lingo: giving your score and feedback…'}
+              {tutorStatus === 'idle' && 'Lingo: idle. Tap mic to try again or go to next word.'}
+            </div>
+          )}
+        </div>
+
+        <LiveTutor
+          language={user.language}
+          context={currentSlide.word}
+          active={isVoiceQuizMicOn}
+          pronunciationMode="score"
+          onKeyError={() => setNeedsApiKey(true)}
+          onStatusChange={setTutorStatus}
+          lessonId={currentLessonId || undefined}
+        />
+
+        <div className="p-6 pt-2 flex flex-col gap-3 bg-white z-10 border-t border-gray-100">
+          <div className="flex gap-3">
+            {isLastCard ? (
+              <Button
+                className="flex-1 !bg-[#58cc02] !shadow-[0_4px_0_0_#46a302]"
+                onClick={finishLessonAndGoToSummary}
+              >
+                Finish pronunciation practice
+              </Button>
+            ) : (
+              <Button
+                className="flex-1 !bg-[#58cc02] !shadow-[0_4px_0_0_#46a302]"
+                onClick={() => {
+                  setIsVoiceQuizMicOn(false);
+                  setVoiceQuizCardIndex(voiceQuizCardIndex + 1);
+                }}
+              >
+                Next word
+              </Button>
+            )}
+            <Button variant="secondary" className="!border-2 !border-gray-200" onClick={finishLessonAndGoToSummary}>
+              Skip
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Show loading state while checking auth
+  if (isAuthenticated === null) {
+    return (
+      <Layout className="justify-center items-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-green-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600 font-bold">Loading...</p>
+        </div>
+      </Layout>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <Layout>
+        <Auth onAuthSuccess={(userData) => {
+          setUser({
+            xp: userData.xp || 0,
+            hearts: userData.hearts || 5,
+            streak: userData.streak || 0,
+            language: userData.languages?.[0]?.language || 'Spanish',
+            goal: 'Quick Practice',
+            theme: userData.languages?.[0]?.preferredTheme || 'auto',
+            level: userData.languages?.[0]?.level || 'beginner'
+          });
+          setIsAuthenticated(true);
+        }} />
+      </Layout>
+    );
+  }
 
   return (
     <Layout>
@@ -430,6 +664,7 @@ const App: React.FC = () => {
       )}
       {view === ViewState.LESSON && renderLesson()}
       {view === ViewState.QUIZ && renderQuiz()}
+      {view === ViewState.VOICE_QUIZ && renderVoiceQuiz()}
       {view === ViewState.SUMMARY && (
         <div className="p-12 flex flex-col h-full items-center justify-center text-center space-y-12 bg-gradient-to-b from-white to-green-50 animate-in zoom-in duration-500">
            <div className="text-[10rem] animate-bounce drop-shadow-2xl">🥇</div>
@@ -437,8 +672,15 @@ const App: React.FC = () => {
              <h2 className="text-6xl font-black text-gray-900 tracking-tighter">Day {user.streak}!</h2>
              <p className="text-gray-500 font-bold text-xl">+10 XP • Native Pronunciation</p>
            </div>
-           <Button className="!bg-[#58cc02] !shadow-[0_4px_0_0_#46a302]" onClick={() => {
-             setUser(prev => ({ ...prev, streak: prev.streak + 1 }));
+           <Button className="!bg-[#58cc02] !shadow-[0_4px_0_0_#46a302]" onClick={async () => {
+                    // Refresh user stats from backend
+                    const progress: any = await apiService.getProgressSummary();
+                    setUser(prev => ({
+                      ...prev,
+                      xp: progress.totalXP || prev.xp,
+                      hearts: progress.hearts || prev.hearts,
+                      streak: progress.streak || prev.streak
+                    }));
              setView(ViewState.HOME);
            }}>Sweet!</Button>
         </div>

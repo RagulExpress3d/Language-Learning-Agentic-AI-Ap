@@ -1,0 +1,29 @@
+# Dependencies
+node_modules
+server/node_modules
+
+# Build outputs (we build in Docker)
+dist
+server/dist
+
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+.idea
+
+# Env and secrets (set in Cloud Run)
+.env
+.env.*
+server/.env
+server/.env.*
+
+# Docs and dev
+*.md
+!README.md
+
+# Misc
+.DS_Store
+*.log
+terminals
