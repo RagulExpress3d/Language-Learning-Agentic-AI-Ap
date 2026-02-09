@@ -126,7 +126,8 @@ router.get('/templates', async (_req, res) => {
     const templates = await LessonTemplate.find({})
       .sort({ createdAt: -1 })
       .limit(50)
-      .select('-slides.visualPrompt')
+      .select('-slides.visualPrompt -slides.imageUrl')
+      .allowDiskUse(true)
       .lean();
     return res.json({
       count: templates.length,
@@ -146,6 +147,7 @@ router.get('/templates', async (_req, res) => {
       })),
     });
   } catch (error) {
+    console.error('Templates route error:', error);
     return res.status(500).json({ error: 'Failed to fetch templates' });
   }
 });
