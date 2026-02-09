@@ -7,6 +7,10 @@ COPY . .
 # Same-origin API when served from this container
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=$VITE_API_URL
+# Optional: pass VITE_GEMINI_API_KEY at build time if you want client-side key (e.g. AI Studio).
+# If omitted, voice/TTS use the backend proxy (GEMINI_API_KEY on server only).
+ARG VITE_GEMINI_API_KEY
+ENV VITE_GEMINI_API_KEY=$VITE_GEMINI_API_KEY
 RUN npm run build
 
 # Stage 2: Build backend

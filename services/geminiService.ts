@@ -1,5 +1,5 @@
 import { GoogleGenAI, Modality } from "@google/genai";
-import { Lesson } from "../types";
+import { apiService } from "./api";
 
 const getApiKey = () => {
   // @ts-ignore
@@ -9,6 +9,9 @@ const getApiKey = () => {
   }
   return import.meta.env.VITE_GEMINI_API_KEY || process.env.API_KEY;
 };
+
+/** True if we have a client-side key (AI Studio or VITE_GEMINI_API_KEY). When false, use backend proxy. */
+export const hasClientKey = () => !!getApiKey();
 
 export const isKeyError = (error: any) => {
   const msg = error?.message || (typeof error === 'string' ? error : "");
@@ -25,8 +28,11 @@ export const isKeyError = (error: any) => {
 
 export const generateTTS = async (text: string, language: string): Promise<string> => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API_KEY_REQUIRED");
-  
+  if (!apiKey) {
+    const { audio } = await apiService.getTTS(text, language);
+    return audio;
+  }
+
   const ai = new GoogleGenAI({ apiKey });
   try {
     const response = await ai.models.generateContent({
@@ -67,8 +73,10 @@ export const scorePronunciation = async (
   language: string
 ): Promise<{ score: number; feedback: string; accuracy: number }> => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API_KEY_REQUIRED");
-  
+  if (!apiKey) {
+    return apiService.scorePronunciation(spokenText, targetText, language);
+  }
+
   const ai = new GoogleGenAI({ apiKey });
   try {
     const response = await ai.models.generateContent({

@@ -149,6 +149,39 @@ class ApiService {
   async getAnalytics(days: number = 30) {
     return this.request(`/analytics/dashboard?days=${days}`);
   }
+
+  /** TTS via backend (no client API key). Returns { audio: base64 }. */
+  async getTTS(text: string, language: string): Promise<{ audio: string }> {
+    return this.request<{ audio: string }>('/tts', {
+      method: 'POST',
+      body: JSON.stringify({ text, language }),
+    });
+  }
+
+  /** Pronunciation score via backend. Returns { score, feedback, accuracy }. */
+  async scorePronunciation(
+    spokenText: string,
+    targetText: string,
+    language: string
+  ): Promise<{ score: number; feedback: string; accuracy: number }> {
+    return this.request('/pronunciation/score', {
+      method: 'POST',
+      body: JSON.stringify({ spokenText, targetText, language }),
+    });
+  }
+
+  /** WebSocket URL for Live API proxy (backend holds API key). */
+  getLiveWsUrl(): string {
+    const base = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+    if (typeof base === 'string' && base.startsWith('http://')) {
+      return base.replace('http://', 'ws://').replace(/\/api\/?$/, '') + '/api/live/ws';
+    }
+    if (typeof base === 'string' && base.startsWith('https://')) {
+      return base.replace('https://', 'wss://').replace(/\/api\/?$/, '') + '/api/live/ws';
+    }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/api/live/ws`;
+  }
 }
 
 export const apiService = new ApiService();

@@ -197,15 +197,9 @@ In [Cloud Run Console](https://console.cloud.google.com/run) → your service �
 
 Use a MongoDB Atlas (or other) cluster and put its connection string in `MONGODB_URI`. For Atlas: Network Access → allow `0.0.0.0/0` (or restrict to Cloud Run IPs if you prefer).
 
-**Voice (Live API) and images**
+**Voice (mic/speaker) — no API key in the browser**
 
-The frontend calls the Gemini API from the browser for the Live voice tutor and for TTS/images if configured there. Set `VITE_GEMINI_API_KEY` at **build** time if you use it in the client; the Dockerfile uses `VITE_API_URL=/api` so the app talks to your API on the same domain. If you use a client-side Gemini key, build with:
-
-```bash
-docker build --build-arg VITE_GEMINI_API_KEY=your-key -t lingo .
-```
-
-For Cloud Run source deploy, you can add a build config or use Secret Manager and substitute at build time.
+Voice (Live tutor and TTS) is **proxied through the backend**. Set `GEMINI_API_KEY` on the server only (e.g. Cloud Run → Variables & secrets → add secret `GEMINI_API_KEY`). The frontend never sees the key; mic and speaker work in the cloud with a normal deploy (e.g. `gcloud run deploy lingo --source . ...`). No build-time key or `cloudbuild.yaml` required.
 
 ### 3. Other deployment options
 

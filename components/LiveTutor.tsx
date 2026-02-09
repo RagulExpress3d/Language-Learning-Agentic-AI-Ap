@@ -10,6 +10,13 @@ import { apiService } from '../services/api';
 const getApiKey = () =>
   import.meta.env.VITE_GEMINI_API_KEY || (typeof process !== 'undefined' && process.env?.API_KEY) || '';
 
+/** Session-like adapter for backend Live proxy (no client API key). */
+type SessionLike = {
+  sendRealtimeInput: (p: { audio: { data: string; mimeType: string } }) => void;
+  sendClientContent: (p: { turns: { role: string; parts: { text: string }[] }[]; turnComplete: boolean }) => void;
+  close: () => void;
+};
+
 export type TranscriptEntry = { role: 'tutor' | 'user'; text: string };
 
 /** 'guide' = speak first, break down word, help user. 'score' = listen only, then give score + feedback (no guiding). */
@@ -115,13 +122,6 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
     }
 
     const apiKey = getApiKey();
-    if (!apiKey) {
-      console.error('LiveTutor: No API key. Set VITE_GEMINI_API_KEY in .env');
-      onKeyErrorRef.current?.();
-      updateStatus('idle');
-      return;
-    }
-
     let micStream: MediaStream | undefined;
     let inputAudioCtx: AudioContext;
     let outputAudioCtx: AudioContext;
@@ -135,7 +135,188 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
       return;
     }
 
-    // Base URL without trailing slash to avoid ...com//ws/... (SDK bug) and "Insufficient resources"
+    audioContextRef.current = outputAudioCtx;
+    outputAudioCtx.resume().catch(() => {});
+
+    let sessionPromise: Promise<SessionLike | any>;
+    const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
+
+    // Proxy path: no client API key — use backend WebSocket (key stays on server).
+    if (!apiKey) {
+      console.log('LiveTutor: using backend proxy (no client key)');
+      updateStatus('connecting');
+      const wsUrl = apiService.getLiveWsUrl();
+      const ws = new WebSocket(wsUrl);
+      const adapter: SessionLike = {
+        sendRealtimeInput: (p) => { try { ws.send(JSON.stringify({ type: 'realtime', audio: p.audio })); } catch (_) {} },
+        sendClientContent: (p) => { try { ws.send(JSON.stringify({ type: 'content', turns: p.turns, turnComplete: p.turnComplete })); } catch (_) {} },
+        close: () => { try { ws.close(); } catch (_) {} },
+      };
+      const handleServerMessage = (message: LiveServerMessage, getSession: () => Promise<SessionLike | any>) => {
+        if (cancelledRef.current) return;
+        if (message.setupComplete !== undefined) {
+          getSession().then(s => {
+            if (cancelledRef.current || !s?.sendClientContent) return;
+            if (pronunciationMode === 'score') {
+              s.sendClientContent({
+                turns: [{ role: 'user', parts: [{ text: `I am about to pronounce the word "${context}" in ${language}. Do not speak. Wait until you hear me say it. Then respond with ONLY: (1) "Score: X out of 10" with a number, (2) one short sentence of feedback in English. Do not guide, repeat the word, or help.` }] }],
+                turnComplete: true,
+              });
+            } else {
+              s.sendClientContent({
+                turns: [{ role: 'user', parts: [{ text: `Begin the lesson. Break the word "${context}" into simpler syllables or vowel parts in ${language}. Say "Repeat after me", then say each part slowly, then the full word, then "Your turn" and wait for me to repeat.` }] }],
+                turnComplete: true,
+              });
+            }
+          }).catch(() => {});
+        }
+        const parts = (message.serverContent as any)?.modelTurn?.parts ?? [];
+        const audioPartCount = parts.filter((p: any) => p.inlineData?.data).length;
+        if (audioPartCount > 0 && !micStartedRef.current) {
+          micStartedRef.current = true;
+          (async () => {
+            if (cancelledRef.current || inputAudioCtx.state === 'closed') return;
+            try {
+              if (!micStream) {
+                micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                if (cancelledRef.current) { micStream!.getTracks().forEach(t => t.stop()); return; }
+              }
+              const source = inputAudioCtx.createMediaStreamSource(micStream!);
+              const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
+              scriptProcessor.onaudioprocess = (e: AudioProcessingEvent) => {
+                adapter.sendRealtimeInput({ audio: createBlob(e.inputBuffer.getChannelData(0)) });
+              };
+              source.connect(scriptProcessor);
+              scriptProcessor.connect(inputAudioCtx.destination);
+              updateStatus('listening');
+              apiService.trackEvent('voice_practice', { language, context, lessonId }).catch(() => {});
+              const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+              if (SpeechRecognitionAPI && !cancelledRef.current) {
+                try {
+                  const recognition = new SpeechRecognitionAPI();
+                  recognition.continuous = true;
+                  recognition.interimResults = true;
+                  recognition.lang = language === 'Spanish' ? 'es-ES' : language === 'French' ? 'fr-FR' : language === 'Japanese' ? 'ja-JP' : language === 'German' ? 'de-DE' : language === 'Italian' ? 'it-IT' : language === 'Chinese' ? 'zh-CN' : language === 'Hindi' ? 'hi-IN' : language === 'Tamil' ? 'ta-IN' : 'en-US';
+                  recognition.onresult = (e: SpeechRecognitionEvent) => {
+                    if (cancelledRef.current) return;
+                    const last = e.results[e.results.length - 1];
+                    if (last.isFinal && last[0]?.transcript?.trim()) {
+                      onTranscriptEntryRef.current?.({ role: 'user', text: last[0].transcript.trim() });
+                    }
+                  };
+                  recognition.onerror = () => {};
+                  recognition.start();
+                  speechRecognitionRef.current = recognition;
+                } catch (_) {}
+              }
+            } catch (e) {
+              console.error('LiveTutor: Microphone access failed', e);
+              updateStatus('idle');
+            }
+          })();
+        }
+        for (const part of parts) {
+          const text = (part as { text?: string }).text;
+          if (text?.trim()) onTranscriptEntryRef.current?.({ role: 'tutor', text: text.trim() });
+          const base64Audio = (part as any).inlineData?.data;
+          if (!base64Audio) continue;
+          if (cancelledRef.current || outputAudioCtx.state === 'closed') continue;
+          updateStatus('speaking');
+          decodeAudioData(decode(base64Audio), outputAudioCtx, 24000, 1).then(audioBuffer => {
+            if (cancelledRef.current || outputAudioCtx.state === 'closed') return;
+            const source = outputAudioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(outputAudioCtx.destination);
+            source.addEventListener('ended', () => {
+              sourcesRef.current.delete(source);
+              if (sourcesRef.current.size === 0) updateStatus('listening');
+            });
+            nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioCtx.currentTime);
+            source.start(nextStartTimeRef.current);
+            nextStartTimeRef.current += audioBuffer.duration;
+            sourcesRef.current.add(source);
+          }).catch(() => {});
+        }
+        if ((message.serverContent as any)?.interrupted) {
+          for (const s of sourcesRef.current) { try { s.stop(); } catch (e) {} }
+          sourcesRef.current.clear();
+          nextStartTimeRef.current = 0;
+          updateStatus('listening');
+        }
+      };
+
+      sessionPromise = new Promise((resolve, reject) => {
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: 'init', language, context, pronunciationMode }));
+        };
+        ws.onmessage = (ev: MessageEvent) => {
+          if (cancelledRef.current) return;
+          let msg: Record<string, unknown>;
+          try {
+            msg = JSON.parse(ev.data as string);
+          } catch {
+            return;
+          }
+          if (msg.type === 'open') {
+            resolve(adapter);
+            updateStatus('connecting');
+            (async () => {
+              try {
+                micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                if (cancelledRef.current) { micStream.getTracks().forEach(t => t.stop()); return; }
+                if (pronunciationMode === 'score' && inputAudioCtx.state !== 'closed') {
+                  const source = inputAudioCtx.createMediaStreamSource(micStream);
+                  const scriptProcessor = inputAudioCtx.createScriptProcessor(4096, 1, 1);
+                  scriptProcessor.onaudioprocess = (e: AudioProcessingEvent) => {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    adapter.sendRealtimeInput({ audio: createBlob(inputData) });
+                  };
+                  source.connect(scriptProcessor);
+                  scriptProcessor.connect(inputAudioCtx.destination);
+                  micStartedRef.current = true;
+                  updateStatus('listening');
+                  apiService.trackEvent('voice_practice', { language, context, lessonId }).catch(() => {});
+                }
+              } catch (e) {
+                console.error('LiveTutor: Microphone access failed', e);
+                updateStatus('idle');
+              }
+            })();
+            return;
+          }
+          if (msg.type === 'error') {
+            onKeyErrorRef.current?.();
+            updateStatus('idle');
+            return;
+          }
+          if (msg.type === 'close') {
+            updateStatus('idle');
+            return;
+          }
+          handleServerMessage(msg as LiveServerMessage, () => sessionPromise);
+        };
+        ws.onerror = () => { updateStatus('idle'); reject(new Error('WebSocket error')); };
+        ws.onclose = () => updateStatus('idle');
+      });
+      sessionRef.current = sessionPromise;
+      sessionPromise.catch(() => {});
+
+      return () => {
+        cancelledRef.current = true;
+        micStartedRef.current = false;
+        sessionRef.current = null;
+        try { speechRecognitionRef.current?.stop(); } catch (e) {}
+        speechRecognitionRef.current = null;
+        if (micStream) micStream.getTracks().forEach(t => t.stop());
+        try {
+          if (inputAudioCtx?.state !== 'closed') inputAudioCtx.close();
+          if (outputAudioCtx?.state !== 'closed') outputAudioCtx.close();
+        } catch (e) {}
+        try { ws.close(); } catch (e) {}
+      };
+    }
+
+    // Direct path: client has API key (e.g. AI Studio or VITE_GEMINI_API_KEY).
     const ai = new GoogleGenAI({
       apiKey,
       httpOptions: { baseUrl: 'https://generativelanguage.googleapis.com' },
@@ -146,15 +327,9 @@ export const LiveTutor: React.FC<LiveTutorProps> = ({
       updateStatus('idle');
       return;
     }
-    audioContextRef.current = outputAudioCtx;
-    // Resume so playback is allowed (browser autoplay policy requires user gesture)
-    outputAudioCtx.resume().catch(() => {});
-
-    const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
     console.log('LiveTutor: starting connection (model:', LIVE_MODEL, ')');
     updateStatus('connecting');
 
-    let sessionPromise: Promise<any>;
     try {
       sessionPromise = ai.live.connect({
       model: LIVE_MODEL,

@@ -1,15 +1,18 @@
+import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { connectDB, dbReady } from './config/database.js';
+import { setupLiveWs } from './liveProxy.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import lessonRoutes from './routes/lessons.js';
 import progressRoutes from './routes/progress.js';
 import analyticsRoutes from './routes/analytics.js';
+import voiceRoutes from './routes/voice.js';
 
 dotenv.config();
 
@@ -51,6 +54,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/lessons', lessonRoutes);
 app.use('/api/progress', progressRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api', voiceRoutes);
 
 if (isProduction) {
   const publicDir = path.join(__dirname, '..', 'public');
@@ -63,9 +67,13 @@ if (isProduction) {
 
 app.use(errorHandler);
 
+// Use HTTP server so we can attach WebSocket for Live API proxy (/api/live/ws).
+const server = http.createServer(app);
+setupLiveWs(server);
+
 // Listen on PORT first so Cloud Run sees the container as ready (startup check).
 // Then connect DB in background; otherwise DB connect can hang/fail and we never bind to PORT.
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
   connectDB().catch((err) => {

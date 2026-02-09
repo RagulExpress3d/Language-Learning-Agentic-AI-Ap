@@ -151,3 +151,40 @@ export const generateTTS = async (text: string, language: string): Promise<strin
     throw new Error(`Failed to generate TTS: ${error.message}`);
   }
 };
+
+export const scorePronunciation = async (
+  spokenText: string,
+  targetText: string,
+  language: string
+): Promise<{ score: number; feedback: string; accuracy: number }> => {
+  try {
+    const ai = getAI();
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `You are a pronunciation expert for ${language}. 
+        The user said: "${spokenText}"
+        The target word/phrase is: "${targetText}"
+        
+        Rate the pronunciation on a scale of 0-100 and provide brief feedback.
+        Return JSON: { "score": number, "feedback": string, "accuracy": number (0-1) }`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            score: { type: Type.NUMBER },
+            feedback: { type: Type.STRING },
+            accuracy: { type: Type.NUMBER },
+          },
+          required: ["score", "feedback", "accuracy"],
+        },
+      },
+    });
+
+    const text = response.text || '{"score": 50, "feedback": "Keep practicing", "accuracy": 0.5}';
+    return JSON.parse(text);
+  } catch (error: any) {
+    console.error('Pronunciation scoring error:', error);
+    return { score: 50, feedback: "Could not analyze pronunciation", accuracy: 0.5 };
+  }
+};
