@@ -16,6 +16,9 @@ dist-ssr
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
+# Note: .env.example files are intentionally tracked as templates (placeholders only, no real keys)
 
 # Editor and IDE
 .cursor
