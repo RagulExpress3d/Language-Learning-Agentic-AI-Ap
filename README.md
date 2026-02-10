@@ -1,5 +1,5 @@
-<img width="492" height="897" alt="image" src="https://github.com/user-attachments/assets/f28dca93-afc7-433f-b0bd-f86fed67f027" />
-<img width="447" height="873" alt="image" src="https://github.com/user-attachments/assets/c7dd49f4-d560-4090-a433-d1c473436a6b" />
+<img width="300" height="600" alt="image" src="https://github.com/user-attachments/assets/f28dca93-afc7-433f-b0bd-f86fed67f027" />
+<img width="300" height="600" alt="image" src="https://github.com/user-attachments/assets/c7dd49f4-d560-4090-a433-d1c473436a6b" />
 
 
 # Lingo — AI-Powered Language Learning
