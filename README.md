@@ -1,8 +1,10 @@
-<img width="300" height="600" alt="image" src="https://github.com/user-attachments/assets/f28dca93-afc7-433f-b0bd-f86fed67f027" />
+<img width="300" height="700" alt="image" src="https://github.com/user-attachments/assets/f28dca93-afc7-433f-b0bd-f86fed67f027" />
 <img width="300" height="600" alt="image" src="https://github.com/user-attachments/assets/c7dd49f4-d560-4090-a433-d1c473436a6b" />
 
 
 # Lingo — AI-Powered Language Learning
+
+Live demo test link - https://language-learning-agentic-ai-ap-97186786896.europe-west1.run.app/
 
 Full-stack language learning app with AI-generated lessons, real-time voice tutoring, MCQ and pronunciation quizzes, and progress tracking. Built with React, Node.js, and Google Gemini.
 
