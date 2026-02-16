@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { IMAGE_PROMPT_BLOCKLIST } from "../config/safety.js";
 
 // Lazy initialization to ensure env vars are loaded
 const getAI = () => {
@@ -45,7 +46,8 @@ export const generateLesson = async (
         3. Quiz 'options' and 'correctAnswer' must be English meanings or translations.
         4. Output strictly valid JSON.
         5. Include 5-7 slides with vocabulary words relevant to the theme.
-        6. Include 3-5 quiz questions testing comprehension.`,
+        6. Include 3-5 quiz questions testing comprehension.
+        7. Use only age-appropriate, non-offensive vocabulary; no violence, adult content, or brand names.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -98,24 +100,63 @@ export const generateLesson = async (
   }
 };
 
+/** Max length for image prompt (from lesson visualPrompt only; no user-supplied prompt). */
+const IMAGE_PROMPT_MAX_LENGTH = 500;
+const IMAGE_GENERATION_TIMEOUT_MS = 30_000;
+
+/** Sanitize prompt: max length, strip control chars, injection phrases, and blocklist terms. In-memory only. */
+function sanitizeImagePrompt(raw: string): string {
+  let s = String(raw).replace(/[\x00-\x1f\x7f]/g, '').trim();
+  const lower = s.toLowerCase();
+  const injectionPhrases = ['ignore previous instructions', 'ignore all above', 'disregard previous'];
+  for (const phrase of injectionPhrases) {
+    if (lower.includes(phrase)) s = s.replace(new RegExp(phrase, 'gi'), '').trim();
+  }
+  for (const term of IMAGE_PROMPT_BLOCKLIST) {
+    if (lower.includes(term.toLowerCase())) {
+      s = s.replace(new RegExp(term, 'gi'), '').trim();
+    }
+  }
+  return s.slice(0, IMAGE_PROMPT_MAX_LENGTH) || 'vocabulary illustration';
+}
+
 export const generateSlideImage = async (prompt: string): Promise<string> => {
+  // Prompt is server-only: set by lesson generation (visualPrompt). No user input is concatenated here.
+  const sanitized = sanitizeImagePrompt(prompt);
+  const fullPrompt = `A vibrant, high-quality, friendly 3D illustration of ${sanitized}. Clean white background, playful and modern.`;
+
+  const fallback = () => `https://picsum.photos/seed/${encodeURIComponent(sanitized)}/400/400`;
+
   try {
     const ai = getAI();
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: {
-        parts: [{ text: `A vibrant, high-quality, friendly 3D illustration of ${prompt}. Clean white background, Duolingo aesthetic.` }]
-      },
-      config: { imageConfig: { aspectRatio: "1:1" } }
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Image generation timeout')), IMAGE_GENERATION_TIMEOUT_MS);
     });
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: { parts: [{ text: fullPrompt }] },
+        config: { imageConfig: { aspectRatio: "1:1" } },
+      }),
+      timeoutPromise,
+    ]) as Awaited<ReturnType<typeof ai.models.generateContent>>;
 
     for (const part of response.candidates?.[0]?.content?.parts || []) {
       if (part.inlineData) return `data:image/png;base64,${part.inlineData.data}`;
     }
-    return `https://picsum.photos/seed/${encodeURIComponent(prompt)}/400/400`;
+    return fallback();
   } catch (error: any) {
-    console.error('Image generation error:', error);
-    return `https://picsum.photos/seed/${encodeURIComponent(prompt)}/400/400`;
+    const msg = String(error?.message ?? error);
+    const isBlocked = /blocked|safety|content policy|not allowed|harmful/i.test(msg);
+    if (isBlocked) {
+      // Fire-and-forget: do not block response
+      setImmediate(() => {
+        console.warn('Image generation blocked by safety filter');
+      });
+    } else {
+      console.error('Image generation error:', msg);
+    }
+    return fallback();
   }
 };
 

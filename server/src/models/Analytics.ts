@@ -2,7 +2,8 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IAnalytics extends Document {
   userId: mongoose.Types.ObjectId;
-  eventType: 'lesson_started' | 'lesson_completed' | 'quiz_answered' | 'voice_practice' | 'slide_viewed';
+  eventType: 'lesson_started' | 'lesson_completed' | 'quiz_answered' | 'voice_practice' | 'slide_viewed'
+    | 'image_blocked' | 'tts_failed' | 'tts_latency_ms' | 'quiz_validation_failed';
   metadata: {
     language?: string;
     lessonId?: string;
@@ -10,6 +11,7 @@ export interface IAnalytics extends Document {
     correct?: boolean;
     timeSpent?: number;
     difficulty?: string;
+    latencyMs?: number;
     [key: string]: any;
   };
   timestamp: Date;
@@ -24,7 +26,8 @@ const AnalyticsSchema = new Schema<IAnalytics>({
   },
   eventType: {
     type: String,
-    enum: ['lesson_started', 'lesson_completed', 'quiz_answered', 'voice_practice', 'slide_viewed'],
+    enum: ['lesson_started', 'lesson_completed', 'quiz_answered', 'voice_practice', 'slide_viewed',
+      'image_blocked', 'tts_failed', 'tts_latency_ms', 'quiz_validation_failed'],
     required: true,
     index: true
   },

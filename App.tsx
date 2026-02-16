@@ -76,7 +76,24 @@ const App: React.FC = () => {
             setIsAuthenticated(false);
           }
         } else {
-          setIsAuthenticated(false);
+          // Demo mode: auto sign in as guest and go straight to language selection
+          try {
+            const { user: userData } = await apiService.trialLogin();
+            setUser({
+              xp: userData.xp || 0,
+              hearts: userData.hearts || 5,
+              streak: userData.streak || 0,
+              language: userData.languages?.[0]?.language || 'Spanish',
+              goal: 'Quick Practice',
+              theme: userData.languages?.[0]?.preferredTheme || 'auto',
+              level: userData.languages?.[0]?.level || 'beginner'
+            });
+            setIsAuthenticated(true);
+            setView(ViewState.ONBOARDING);
+          } catch (err) {
+            console.error('Trial login failed:', err);
+            setIsAuthenticated(false);
+          }
         }
       } catch (error) {
         console.error('Auth error:', error);

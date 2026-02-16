@@ -6,6 +6,8 @@ import { User } from '../models/User.js';
 import { generateLesson, generateSlideImage } from '../services/geminiService.js';
 import { Analytics } from '../models/Analytics.js';
 import { updateStreakAndLastActive } from '../utils/streak.js';
+import { validateAndFixQuizzes } from '../utils/quizValidation.js';
+import { filterAndValidateSlides } from '../utils/vocabularyGuardrails.js';
 import { z } from 'zod';
 
 const router = express.Router();
@@ -75,7 +77,10 @@ router.post('/generate', authenticate, async (req: AuthRequest, res, next) => {
     } else {
       // First time anyone (guest or signed-in) requested this language+theme+level: generate once, store for reuse.
       const lessonData = await generateLesson(language, theme, userGoal, adjustedLevel);
+      validateAndFixQuizzes(lessonData);
+      filterAndValidateSlides(lessonData);
 
+      // visualPrompt is from AI-generated lesson only; no user-supplied text is passed to image generation.
       const slidesWithImages = await Promise.all(
         lessonData.slides.map(async (slide) => {
           const imageUrl = await generateSlideImage(slide.visualPrompt);

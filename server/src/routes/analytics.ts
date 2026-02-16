@@ -6,7 +6,8 @@ import { z } from 'zod';
 const router = express.Router();
 
 const trackEventSchema = z.object({
-  eventType: z.enum(['lesson_started', 'lesson_completed', 'quiz_answered', 'voice_practice', 'slide_viewed']),
+  eventType: z.enum(['lesson_started', 'lesson_completed', 'quiz_answered', 'voice_practice', 'slide_viewed',
+    'image_blocked', 'tts_failed', 'tts_latency_ms', 'quiz_validation_failed']),
   metadata: z.record(z.any()).optional()
 });
 
@@ -49,9 +50,12 @@ router.get('/dashboard', authenticate, async (req: AuthRequest, res) => {
       completedLessons: events.filter(e => e.eventType === 'lesson_completed').length,
       quizAnswers: events.filter(e => e.eventType === 'quiz_answered').length,
       voicePractices: events.filter(e => e.eventType === 'voice_practice').length,
-      correctAnswers: events.filter(e => 
+      correctAnswers: events.filter(e =>
         e.eventType === 'quiz_answered' && e.metadata?.correct === true
       ).length,
+      imageBlocked: events.filter(e => e.eventType === 'image_blocked').length,
+      ttsFailed: events.filter(e => e.eventType === 'tts_failed').length,
+      quizValidationFailed: events.filter(e => e.eventType === 'quiz_validation_failed').length,
       averageScore: 0,
       timeSpent: 0
     };
